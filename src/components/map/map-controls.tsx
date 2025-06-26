@@ -106,10 +106,8 @@ export class UploadControl implements maplibregl.IControl {
 // Navigation Controls
 export class NavigationControl implements maplibregl.IControl {
   private container!: HTMLDivElement;
-  private map: maplibregl.Map | null = null;
 
   onAdd(map: maplibregl.Map): HTMLElement {
-    this.map = map;
     this.container = document.createElement('div');
     this.container.className = 'maplibregl-ctrl maplibregl-ctrl-group';
 
@@ -157,10 +155,9 @@ export class NavigationControl implements maplibregl.IControl {
 export class LocateControl implements maplibregl.IControl {
   private container!: HTMLDivElement;
   private map: maplibregl.Map | null = null;
-  private props: MapControlsProps;
 
-  constructor(props: MapControlsProps) {
-    this.props = props;
+  constructor() {
+    // No props needed for this control
   }
 
   onAdd(map: maplibregl.Map): HTMLElement {
