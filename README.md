@@ -2,6 +2,8 @@
 
 An interactive web application for finding and exploring water points, fountains, and drinking water sources on an interactive map.
 
+🌐 **Live Demo**: [https://fxi.io/geodrink](https://fxi.io/geodrink)
+
 ## Features
 
 - 🗺️ **Interactive Map**: Powered by MapLibre GL for smooth, responsive mapping experience
