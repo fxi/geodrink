@@ -1,17 +1,11 @@
 import { useState, useCallback, useEffect } from 'react';
-import { Settings, Trash2, Download, Info, Droplets } from 'lucide-react';
+import { Settings, Trash2, Download, Info, MapPin } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Slider } from '@/components/ui/slider';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import {
   Sheet,
   SheetContent,
@@ -20,20 +14,22 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet';
 import { toast } from 'sonner';
-import { GPXData, WaterPoint } from '@/types';
+import { GPXData, LocationPoint, LocationFilters } from '@/types';
 import { CacheManager } from '@/utils/cache-manager';
-import { findWaterPoints, WATER_FILTER_PRESETS } from '@/utils/overpass-api';
+import { findLocationPoints } from '@/utils/overpass-api';
+import { exportLocationPointsAsGPX } from '@/utils/gpx-export';
+import { LOCATION_ICONS } from '@/utils/location-icons';
 
 interface SettingsPanelProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   bufferDistance: number;
   onBufferDistanceChange: (distance: number) => void;
-  waterFilterPreset: string;
-  onWaterFilterPresetChange: (preset: string) => void;
+  locationFilters: LocationFilters;
+  onLocationFiltersChange: (filters: LocationFilters) => void;
   gpxData: GPXData | null;
-  waterPoints: WaterPoint[];
-  onWaterPointsLoad: (points: WaterPoint[]) => void;
+  locationPoints: LocationPoint[];
+  onLocationPointsLoad: (points: LocationPoint[]) => void;
   onLoadingChange: (loading: boolean) => void;
   isLoading: boolean;
 }
@@ -43,11 +39,11 @@ export function SettingsPanel({
   onOpenChange,
   bufferDistance,
   onBufferDistanceChange,
-  waterFilterPreset,
-  onWaterFilterPresetChange,
+  locationFilters,
+  onLocationFiltersChange,
   gpxData,
-  waterPoints,
-  onWaterPointsLoad,
+  locationPoints,
+  onLocationPointsLoad,
   onLoadingChange,
   isLoading
 }: SettingsPanelProps) {
@@ -66,27 +62,40 @@ export function SettingsPanel({
     onBufferDistanceChange(distance);
   }, [onBufferDistanceChange]);
 
-  // Refetch water points when buffer distance or filter preset changes
+  const handleFilterChange = useCallback((filterKey: keyof LocationFilters, checked: boolean) => {
+    onLocationFiltersChange({
+      ...locationFilters,
+      [filterKey]: checked
+    });
+  }, [locationFilters, onLocationFiltersChange]);
+
+  // Refetch location points when buffer distance or filters change
   useEffect(() => {
     if (gpxData && !isLoading) {
-      const refetchWaterPoints = async () => {
+      const hasActiveFilters = Object.values(locationFilters).some(Boolean);
+      if (!hasActiveFilters) {
+        onLocationPointsLoad([]);
+        return;
+      }
+
+      const refetchLocationPoints = async () => {
         onLoadingChange(true);
         try {
-          const waterPoints = await findWaterPoints(gpxData, bufferDistance, waterFilterPreset);
-          onWaterPointsLoad(waterPoints);
-          toast.success(`Updated: Found ${waterPoints.length} water points`);
+          const points = await findLocationPoints(gpxData, bufferDistance, locationFilters);
+          onLocationPointsLoad(points);
+          toast.success(`Updated: Found ${points.length} location points`);
         } catch (error) {
-          console.error('Error refetching water points:', error);
-          toast.error('Failed to update water points');
+          console.error('Error refetching location points:', error);
+          toast.error('Failed to update location points');
         } finally {
           onLoadingChange(false);
         }
       };
       
-      const timeoutId = setTimeout(refetchWaterPoints, 500); // Debounce
+      const timeoutId = setTimeout(refetchLocationPoints, 500); // Debounce
       return () => clearTimeout(timeoutId);
     }
-  }, [bufferDistance, waterFilterPreset, gpxData, onWaterPointsLoad, onLoadingChange, isLoading]);
+  }, [bufferDistance, locationFilters, gpxData, onLocationPointsLoad, onLoadingChange, isLoading]);
 
   const clearCache = () => {
     CacheManager.clear();
@@ -94,23 +103,38 @@ export function SettingsPanel({
     toast.success('Cache cleared successfully');
   };
 
-  const exportWaterPoints = () => {
-    if (waterPoints.length === 0) {
-      toast.error('No water points to export');
+  const exportLocationPoints = () => {
+    if (locationPoints.length === 0) {
+      toast.error('No location points to export');
+      return;
+    }
+
+    try {
+      exportLocationPointsAsGPX(locationPoints, gpxData?.name || 'Route Points');
+      toast.success('Location points exported as GPX successfully');
+    } catch (error) {
+      console.error('Error exporting GPX:', error);
+      toast.error('Failed to export location points');
+    }
+  };
+
+  const exportCSV = () => {
+    if (locationPoints.length === 0) {
+      toast.error('No location points to export');
       return;
     }
 
     const csv = [
-      ['Distance (km)', 'Type', 'Name', 'Latitude', 'Longitude', 'Access', 'Potable', 'Fee'],
-      ...waterPoints.map(point => [
+      ['Distance (km)', 'Type', 'Category', 'Name', 'Latitude', 'Longitude', 'Access', 'Opening Hours'],
+      ...locationPoints.map(point => [
         (point.distanceFromStart / 1000).toFixed(2),
         point.type,
+        point.category,
         point.tags?.name || point.tags?.['name:en'] || `${point.type} Point`,
         point.lat.toFixed(6),
         point.lon.toFixed(6),
         point.tags?.access || 'Unknown',
-        point.tags?.drinking_water || 'Unknown',
-        point.tags?.fee || 'No'
+        point.tags?.opening_hours || 'Unknown'
       ])
     ].map(row => row.join(',')).join('\n');
 
@@ -118,11 +142,11 @@ export function SettingsPanel({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `water-points-${new Date().toISOString().split('T')[0]}.csv`;
+    a.download = `location-points-${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     
-    toast.success('Water points exported successfully');
+    toast.success('Location points exported as CSV successfully');
   };
 
   const formatBytes = (bytes: number) => {
@@ -132,6 +156,45 @@ export function SettingsPanel({
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
   };
+
+  const filterOptions = [
+    { 
+      key: 'drinkingWater' as const, 
+      label: LOCATION_ICONS.drinkingWater.label, 
+      icon: LOCATION_ICONS.drinkingWater.icon, 
+      color: 'text-blue-400' 
+    },
+    { 
+      key: 'restaurants' as const, 
+      label: LOCATION_ICONS.restaurants.label, 
+      icon: LOCATION_ICONS.restaurants.icon, 
+      color: 'text-orange-400' 
+    },
+    { 
+      key: 'supermarkets' as const, 
+      label: LOCATION_ICONS.supermarkets.label, 
+      icon: LOCATION_ICONS.supermarkets.icon, 
+      color: 'text-green-400' 
+    },
+    { 
+      key: 'gasStations' as const, 
+      label: LOCATION_ICONS.gasStations.label, 
+      icon: LOCATION_ICONS.gasStations.icon, 
+      color: 'text-red-400' 
+    },
+    { 
+      key: 'hospitals' as const, 
+      label: LOCATION_ICONS.hospitals.label, 
+      icon: LOCATION_ICONS.hospitals.icon, 
+      color: 'text-red-600' 
+    },
+    { 
+      key: 'graveyards' as const, 
+      label: LOCATION_ICONS.graveyards.label, 
+      icon: LOCATION_ICONS.graveyards.icon, 
+      color: 'text-gray-400' 
+    },
+  ];
 
   return (
     <Sheet open={isOpen} onOpenChange={onOpenChange}>
@@ -147,40 +210,37 @@ export function SettingsPanel({
         </SheetHeader>
 
         <div className="space-y-6 mt-6">
-          {/* Water Source Filter */}
+          {/* Location Filters */}
           <Card>
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
-                <Droplets className="h-5 w-5 text-blue-400" />
-                Water Source Filter
+                <MapPin className="h-5 w-5 text-purple-400" />
+                Location Filters
               </CardTitle>
               <CardDescription>
-                Choose what type of water sources to find along your route
+                Select the types of locations to find along your route
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="water-filter">Filter Preset</Label>
-                <Select value={waterFilterPreset} onValueChange={onWaterFilterPresetChange}>
-                  <SelectTrigger>
-                    <SelectValue placeholder="Select water filter" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {WATER_FILTER_PRESETS.map((preset) => (
-                      <SelectItem key={preset.id} value={preset.id}>
-                        <div className="flex flex-col">
-                          <span className="font-medium">{preset.name}</span>
-                          <span className="text-xs text-muted-foreground">{preset.description}</span>
-                        </div>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+              <div className="grid grid-cols-1 gap-4">
+                {filterOptions.map(({ key, label, icon: Icon, color }) => (
+                  <div key={key} className="flex items-center space-x-3">
+                    <Checkbox
+                      id={key}
+                      checked={locationFilters[key]}
+                      onCheckedChange={(checked) => handleFilterChange(key, checked as boolean)}
+                    />
+                    <Label htmlFor={key} className="flex items-center gap-2 cursor-pointer text-white">
+                      <Icon className={`h-4 w-4 ${color}`} />
+                      {label}
+                    </Label>
+                  </div>
+                ))}
               </div>
               
               <div className="text-sm text-muted-foreground">
                 <Info className="h-4 w-4 inline mr-1" />
-                {WATER_FILTER_PRESETS.find(p => p.id === waterFilterPreset)?.description || 'Filter water sources by quality and accessibility'}
+                Select multiple location types to find various amenities along your route
               </div>
             </CardContent>
           </Card>
@@ -190,7 +250,7 @@ export function SettingsPanel({
             <CardHeader>
               <CardTitle className="text-lg">Search Buffer Distance</CardTitle>
               <CardDescription>
-                Distance from the route to search for water points
+                Distance from the route to search for location points
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -216,7 +276,7 @@ export function SettingsPanel({
               
               <div className="text-sm text-muted-foreground">
                 <Info className="h-4 w-4 inline mr-1" />
-                Lower values find fewer but more relevant water points. Higher values may include distant sources.
+                Lower values find fewer but more relevant points. Higher values may include distant locations.
               </div>
             </CardContent>
           </Card>
@@ -242,8 +302,8 @@ export function SettingsPanel({
                     <p className="font-medium">{gpxData.coordinates.length.toLocaleString()}</p>
                   </div>
                   <div>
-                    <Label className="text-muted-foreground">Water Points Found</Label>
-                    <p className="font-medium">{waterPoints.length}</p>
+                    <Label className="text-muted-foreground">Location Points Found</Label>
+                    <p className="font-medium">{locationPoints.length}</p>
                   </div>
                 </div>
               </CardContent>
@@ -255,7 +315,7 @@ export function SettingsPanel({
             <CardHeader>
               <CardTitle className="text-lg">Cache Management</CardTitle>
               <CardDescription>
-                Manage cached water point data to improve performance
+                Manage cached location data to improve performance
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -291,45 +351,55 @@ export function SettingsPanel({
             <CardHeader>
               <CardTitle className="text-lg">Export Data</CardTitle>
               <CardDescription>
-                Export water points data for external use
+                Export location points data for external use
               </CardDescription>
             </CardHeader>
-            <CardContent>
+            <CardContent className="space-y-3">
               <Button 
-                onClick={exportWaterPoints}
+                onClick={exportLocationPoints}
                 className="w-full"
-                disabled={waterPoints.length === 0}
+                disabled={locationPoints.length === 0}
               >
                 <Download className="h-4 w-4 mr-2" />
-                Export Water Points (CSV)
+                Export as GPX Waypoints
               </Button>
               
-              {waterPoints.length > 0 && (
-                <div className="text-xs text-muted-foreground mt-2">
-                  Will export {waterPoints.length} water points with coordinates and metadata
+              <Button 
+                onClick={exportCSV}
+                variant="outline"
+                className="w-full"
+                disabled={locationPoints.length === 0}
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Export as CSV
+              </Button>
+              
+              {locationPoints.length > 0 && (
+                <div className="text-xs text-muted-foreground">
+                  Will export {locationPoints.length} location points with coordinates and metadata
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Water Point Statistics */}
-          {waterPoints.length > 0 && (
+          {/* Location Point Statistics */}
+          {locationPoints.length > 0 && (
             <Card>
               <CardHeader>
-                <CardTitle className="text-lg">Water Point Statistics</CardTitle>
+                <CardTitle className="text-lg">Location Statistics</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="space-y-3">
                   {Object.entries(
-                    waterPoints.reduce((acc, point) => {
-                      acc[point.type] = (acc[point.type] || 0) + 1;
+                    locationPoints.reduce((acc, point) => {
+                      acc[point.category] = (acc[point.category] || 0) + 1;
                       return acc;
                     }, {} as Record<string, number>)
-                  ).map(([type, count]) => (
-                    <div key={type} className="flex items-center justify-between">
+                  ).map(([category, count]) => (
+                    <div key={category} className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Badge variant="secondary" className="capitalize">
-                          {type}
+                          {category}
                         </Badge>
                       </div>
                       <span className="font-medium">{count}</span>

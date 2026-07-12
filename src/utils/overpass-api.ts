@@ -1,4 +1,4 @@
-import { GPXData, WaterPoint, CurrentPosition, WaterFilterPreset } from '@/types';
+import { GPXData, WaterPoint, LocationPoint, CurrentPosition, WaterFilterPreset, LocationFilters } from '@/types';
 import { CacheManager } from './cache-manager';
 
 // Water filter presets for different use cases
@@ -47,6 +47,222 @@ export const WATER_FILTER_PRESETS: WaterFilterPreset[] = [
 ];
 
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+
+export async function findLocationPoints(
+  gpxData: GPXData,
+  bufferDistance: number = 15,
+  filters: LocationFilters
+): Promise<LocationPoint[]> {
+  try {
+    // Create cache key based on filters
+    const filterKey = Object.entries(filters)
+      .filter(([, enabled]) => enabled)
+      .map(([key]) => key)
+      .sort()
+      .join('_');
+    
+    const cacheKey = CacheManager.generateCacheKey(gpxData.bounds, bufferDistance) + `_locations_${filterKey}`;
+    const cachedData = CacheManager.get<LocationPoint[]>(cacheKey);
+    
+    if (cachedData) {
+      console.log('Using cached location points data');
+      return cachedData;
+    }
+
+    const query = buildLocationQuery(gpxData, bufferDistance, filters);
+    
+    const response = await fetch(OVERPASS_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+      },
+      body: query
+    });
+
+    if (!response.ok) {
+      throw new Error(`Overpass API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const locationPoints: LocationPoint[] = [];
+
+    // Process nodes (points)
+    if (data.elements) {
+      for (const element of data.elements) {
+        if (element.type === 'node' && element.lat && element.lon) {
+          const locationPoint = processLocationPoint(element, gpxData, bufferDistance);
+          if (locationPoint) {
+            locationPoints.push(locationPoint);
+          }
+        }
+      }
+    }
+
+    // Sort by distance from start
+    const sortedLocationPoints = locationPoints.sort((a, b) => a.distanceFromStart - b.distanceFromStart);
+    
+    // Cache the results
+    CacheManager.set(cacheKey, sortedLocationPoints, gpxData.bounds, bufferDistance);
+    
+    return sortedLocationPoints;
+  } catch (error) {
+    console.error('Error fetching location points:', error);
+    return [];
+  }
+}
+
+function buildLocationQuery(gpxData: GPXData, bufferDistance: number, filters: LocationFilters): string {
+  const { bounds } = gpxData;
+  
+  // Convert buffer distance from meters to degrees (rough approximation)
+  const padding = bufferDistance / 111000; // 1 degree ≈ 111km
+  const bbox = `${bounds.south - padding},${bounds.west - padding},${bounds.north + padding},${bounds.east + padding}`;
+
+  const queries: string[] = [];
+  
+  // Add queries based on enabled filters
+  if (filters.drinkingWater) {
+    queries.push(`node["amenity"="drinking_water"](${bbox});`);
+    queries.push(`node["amenity"="fountain"](${bbox});`);
+    queries.push(`node["amenity"="water_point"](${bbox});`);
+    queries.push(`node["man_made"="water_well"](${bbox});`);
+    queries.push(`node["natural"="spring"](${bbox});`);
+    queries.push(`node["amenity"="water_tap"](${bbox});`);
+  }
+  
+  if (filters.restaurants) {
+    queries.push(`node["amenity"="restaurant"](${bbox});`);
+    queries.push(`node["amenity"="fast_food"](${bbox});`);
+    queries.push(`node["amenity"="cafe"](${bbox});`);
+    queries.push(`node["amenity"="bar"](${bbox});`);
+    queries.push(`node["amenity"="pub"](${bbox});`);
+  }
+  
+  if (filters.supermarkets) {
+    queries.push(`node["shop"="supermarket"](${bbox});`);
+    queries.push(`node["shop"="convenience"](${bbox});`);
+    queries.push(`node["shop"="general"](${bbox});`);
+    queries.push(`node["shop"="grocery"](${bbox});`);
+    queries.push(`node["amenity"="marketplace"](${bbox});`);
+  }
+  
+  if (filters.gasStations) {
+    queries.push(`node["amenity"="fuel"](${bbox});`);
+  }
+  
+  if (filters.hospitals) {
+    queries.push(`node["amenity"="hospital"](${bbox});`);
+    queries.push(`node["amenity"="clinic"](${bbox});`);
+    queries.push(`node["amenity"="doctors"](${bbox});`);
+    queries.push(`node["amenity"="pharmacy"](${bbox});`);
+    queries.push(`node["healthcare"="centre"](${bbox});`);
+  }
+  
+  if (filters.graveyards) {
+    queries.push(`node["amenity"="grave_yard"](${bbox});`);
+    queries.push(`node["landuse"="cemetery"](${bbox});`);
+  }
+
+  if (queries.length === 0) {
+    return `[out:json][timeout:30];();out geom;`; // Empty query
+  }
+
+  return `
+    [out:json][timeout:30];
+    (
+      ${queries.join('\n      ')}
+    );
+    out geom;
+  `;
+}
+
+function processLocationPoint(
+  element: { lat: number; lon: number; tags?: Record<string, string>; id: number },
+  gpxData: GPXData,
+  bufferDistance: number
+): LocationPoint | null {
+  const { lat, lon, tags = {}, id } = element;
+  
+  // Calculate distance from route start
+  const distanceFromStart = calculateDistanceFromStart(lat, lon, gpxData);
+  
+  // Calculate minimum distance from route
+  const distanceFromRoute = calculateMinDistanceFromRoute(lat, lon, gpxData);
+  
+  // Filter points that are too far from the route
+  if (distanceFromRoute > bufferDistance) {
+    return null;
+  }
+
+  // Determine location type and category
+  const { type, category, amenityType } = determineLocationTypeAndCategory(tags);
+
+  return {
+    id: id.toString(),
+    lat,
+    lon,
+    tags,
+    distanceFromStart,
+    distanceFromRoute,
+    type,
+    category,
+    amenityType
+  };
+}
+
+function determineLocationTypeAndCategory(tags: Record<string, string>): {
+  type: LocationPoint['type'];
+  category: LocationPoint['category'];
+  amenityType: string;
+} {
+  const amenity = tags.amenity;
+  const shop = tags.shop;
+  const healthcare = tags.healthcare;
+  const landuse = tags.landuse;
+  const manMade = tags.man_made;
+  const natural = tags.natural;
+
+  // Water sources
+  if (amenity === 'drinking_water' || amenity === 'fountain') {
+    return { type: 'fountain', category: 'water', amenityType: amenity };
+  }
+  if (amenity === 'water_point' || amenity === 'water_tap') {
+    return { type: 'tap', category: 'water', amenityType: amenity };
+  }
+  if (manMade === 'water_well') {
+    return { type: 'well', category: 'water', amenityType: manMade };
+  }
+  if (natural === 'spring') {
+    return { type: 'spring', category: 'water', amenityType: natural };
+  }
+
+  // Food & Restaurants
+  if (amenity === 'restaurant' || amenity === 'fast_food' || amenity === 'cafe' || amenity === 'bar' || amenity === 'pub') {
+    return { type: 'restaurant', category: 'food', amenityType: amenity };
+  }
+
+  // Supermarkets & Shops
+  if (shop === 'supermarket' || shop === 'convenience' || shop === 'general' || shop === 'grocery' || amenity === 'marketplace') {
+    return { type: 'supermarket', category: 'food', amenityType: shop || amenity };
+  }
+
+  // Gas Stations
+  if (amenity === 'fuel') {
+    return { type: 'fuel', category: 'fuel', amenityType: amenity };
+  }
+
+  // Hospitals & Health
+  if (amenity === 'hospital' || amenity === 'clinic' || amenity === 'doctors' || amenity === 'pharmacy' || healthcare === 'centre') {
+    return { type: 'hospital', category: 'health', amenityType: amenity || healthcare };
+  }
+
+  // Graveyards
+  if (amenity === 'grave_yard' || landuse === 'cemetery') {
+    return { type: 'graveyard', category: 'services', amenityType: amenity || landuse };
+  }
+
+  return { type: 'other', category: 'other', amenityType: amenity || shop || healthcare || landuse || manMade || natural || 'unknown' };
+}
 
 export async function findWaterPoints(
   gpxData: GPXData, 
@@ -201,7 +417,9 @@ function processWaterPoint(
     tags,
     distanceFromStart,
     distanceFromRoute,
-    type
+    type,
+    category: 'water' as const,
+    amenityType: tags.amenity || tags.man_made || tags.natural || 'unknown'
   };
 }
 

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
-import { MapViewProps } from '@/types';
-import { createRouteGeoJSON, createWaterPointsGeoJSON } from '@/utils/map-utils';
+import { MapViewProps, LocationPoint, WaterPoint } from '@/types';
+import { createRouteGeoJSON } from '@/utils/map-utils';
+import { LOCATION_ICONS } from '@/utils/location-icons';
 
 export interface MapViewRef {
   zoomIn: () => void;
@@ -14,13 +15,17 @@ export interface MapViewRef {
 export const MapView = forwardRef<MapViewRef, MapViewProps>(({ 
   gpxData, 
   waterPoints, 
+  locationPoints,
   currentPosition,
   selectedWaterPoint,
+  selectedLocationPoint,
   onWaterPointSelect,
+  onLocationPointSelect,
   className 
 }, ref) => {
   const mapContainer = useRef<HTMLDivElement>(null);
   const map = useRef<maplibregl.Map | null>(null);
+  const markersRef = useRef<maplibregl.Marker[]>([]);
 
   useImperativeHandle(ref, () => ({
     zoomIn: () => {
@@ -87,7 +92,7 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
     // Initialize map with MapTiler vector tiles
     map.current = new maplibregl.Map({
       container: mapContainer.current,
-      style: 'https://api.maptiler.com/maps/outdoor-v2/style.json?key=r0T8W9TTH8XCCGoLL9gE',
+      style: 'https://api.maptiler.com/maps/outdoor-v2/style.json?key=sZ1OmwWx9EEcSEyGWBa8',
       center: [2.3522, 48.8566], // Paris default
       zoom: 10
     });
@@ -178,87 +183,138 @@ export const MapView = forwardRef<MapViewRef, MapViewProps>(({
 
   }, [gpxData]);
 
-  // Update water points when they change
+  // Helper function to create unified HTML marker element for both water points and location points
+  const createMarkerElement = (point: LocationPoint | WaterPoint): HTMLElement => {
+    const el = document.createElement('div');
+    el.className = 'custom-marker';
+    
+    // Get the appropriate icon and color from the shared system
+    let iconData;
+    if (point.category === 'water') {
+      iconData = LOCATION_ICONS.drinkingWater;
+    } else if (point.type === 'restaurant') {
+      iconData = LOCATION_ICONS.restaurants;
+    } else if (point.type === 'supermarket') {
+      iconData = LOCATION_ICONS.supermarkets;
+    } else if (point.type === 'fuel') {
+      iconData = LOCATION_ICONS.gasStations;
+    } else if (point.type === 'hospital') {
+      iconData = LOCATION_ICONS.hospitals;
+    } else if (point.type === 'graveyard') {
+      iconData = LOCATION_ICONS.graveyards;
+    } else {
+      iconData = LOCATION_ICONS.drinkingWater; // fallback
+    }
+    
+    el.innerHTML = `
+      <div style="
+        background: ${iconData.color};
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        border: 2px solid white;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        cursor: pointer;
+        transition: transform 0.2s;
+      " onmouseover="this.style.transform='scale(1.1)'" onmouseout="this.style.transform='scale(1)'">
+        ${iconData.emoji}
+      </div>
+    `;
+    
+    return el;
+  };
+
+  // Helper function to create popup content with Google Maps integration
+  const createPopupContent = (point: LocationPoint | WaterPoint): string => {
+    const name = point.tags?.name || point.tags?.['name:en'] || `${point.type} Point`;
+    const googleMapsUrl = `https://www.google.com/maps?q=${point.lat},${point.lon}`;
+    const directionsUrl = `https://www.google.com/maps/dir/?api=1&destination=${point.lat},${point.lon}`;
+    
+    return `
+      <div class="p-3 min-w-[250px]">
+        <h3 class="font-semibold text-lg mb-2">${name}</h3>
+        <div class="space-y-1 text-sm text-gray-600 mb-3">
+          <p><strong>Type:</strong> ${point.type} (${point.category})</p>
+          <p><strong>Distance:</strong> ${(point.distanceFromStart / 1000).toFixed(1)}km from start</p>
+          ${point.tags?.opening_hours ? `<p><strong>Hours:</strong> ${point.tags.opening_hours}</p>` : ''}
+          ${point.tags?.phone ? `<p><strong>Phone:</strong> ${point.tags.phone}</p>` : ''}
+          ${point.tags?.website ? `<p><strong>Website:</strong> <a href="${point.tags.website}" target="_blank" class="text-blue-600 hover:underline">Visit</a></p>` : ''}
+          ${point.tags?.cuisine ? `<p><strong>Cuisine:</strong> ${point.tags.cuisine}</p>` : ''}
+          ${point.tags?.drinking_water ? `<p><strong>Drinking Water:</strong> ${point.tags.drinking_water}</p>` : ''}
+          ${point.tags?.access ? `<p><strong>Access:</strong> ${point.tags.access}</p>` : ''}
+        </div>
+        <div class="flex gap-2">
+          <a href="${googleMapsUrl}" target="_blank" 
+             class="px-3 py-1 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 transition-colors">
+            Open in Google Maps
+          </a>
+          <a href="${directionsUrl}" target="_blank" 
+             class="px-3 py-1 bg-green-500 text-white text-xs rounded hover:bg-green-600 transition-colors">
+            Get Directions
+          </a>
+        </div>
+      </div>
+    `;
+  };
+
+  // Update all points (both location points and water points) with unified HTML markers
   useEffect(() => {
     if (!map.current) return;
 
-    // Remove existing water points if they exist
-    if (map.current.getSource('water-points')) {
-      map.current.removeLayer('water-points');
-      map.current.removeSource('water-points');
-    }
+    // Clear existing markers
+    markersRef.current.forEach(marker => marker.remove());
+    markersRef.current = [];
 
-    if (waterPoints.length === 0) return;
+    // Combine all points into one array
+    const allPoints: (LocationPoint | WaterPoint)[] = [...locationPoints, ...waterPoints];
 
-    const waterPointsGeoJSON = createWaterPointsGeoJSON(waterPoints);
+    if (allPoints.length === 0) return;
 
-    // Add water points source and layer
-    map.current.addSource('water-points', {
-      type: 'geojson',
-      data: waterPointsGeoJSON
-    });
-
-    map.current.addLayer({
-      id: 'water-points',
-      type: 'circle',
-      source: 'water-points',
-      paint: {
-        'circle-radius': 8,
-        'circle-color': [
-          'match',
-          ['get', 'type'],
-          'fountain', '#3B82F6',
-          'well', '#10B981',
-          'spring', '#059669',
-          'tap', '#8B5CF6',
-          '#6B7280'
-        ],
-        'circle-stroke-width': 2,
-        'circle-stroke-color': '#ffffff'
-      }
-    });
-
-    // Add click handlers for water points
-    map.current.on('click', 'water-points', (e) => {
-      if (!e.features || !e.features[0]) return;
+    // Create HTML markers for each point
+    allPoints.forEach(point => {
+      const el = createMarkerElement(point);
       
-      const feature = e.features[0];
-      const properties = feature.properties;
-      
-      if (!properties) return;
-
-      // Find the water point and select it
-      const waterPoint = waterPoints.find(wp => wp.id === properties.id);
-      if (waterPoint && onWaterPointSelect) {
-        onWaterPointSelect(waterPoint);
-      }
-
-      new maplibregl.Popup()
-        .setLngLat([properties.lon, properties.lat])
-        .setHTML(`
-          <div class="p-2">
-            <h3 class="font-semibold">${properties.name || `${properties.type} Point`}</h3>
-            <p class="text-sm text-gray-600">Distance: ${(properties.distanceFromStart / 1000).toFixed(1)}km</p>
-            ${properties.info ? `<p class="text-sm mt-1">${properties.info}</p>` : ''}
-          </div>
-        `)
+      const marker = new maplibregl.Marker(el)
+        .setLngLat([point.lon, point.lat])
         .addTo(map.current!);
+
+      // Add click handler for marker
+      el.addEventListener('click', () => {
+        // Handle selection based on point type
+        if ('category' in point && point.category === 'water' && onWaterPointSelect) {
+          onWaterPointSelect(point as WaterPoint);
+        } else if (onLocationPointSelect) {
+          onLocationPointSelect(point as LocationPoint);
+        }
+
+        // Create and show popup
+        new maplibregl.Popup({ offset: 25 })
+          .setLngLat([point.lon, point.lat])
+          .setHTML(createPopupContent(point))
+          .addTo(map.current!);
+      });
+
+      markersRef.current.push(marker);
     });
 
-    // Change cursor on hover
-    map.current.on('mouseenter', 'water-points', () => {
-      if (map.current) {
-        map.current.getCanvas().style.cursor = 'pointer';
-      }
+  }, [locationPoints, waterPoints, onLocationPointSelect, onWaterPointSelect]);
+
+  // Center map on selected location point
+  useEffect(() => {
+    if (!map.current || !selectedLocationPoint) return;
+
+    // Center map on selected location point
+    map.current.flyTo({
+      center: [selectedLocationPoint.lon, selectedLocationPoint.lat],
+      zoom: Math.max(map.current.getZoom(), 15),
+      duration: 1000
     });
 
-    map.current.on('mouseleave', 'water-points', () => {
-      if (map.current) {
-        map.current.getCanvas().style.cursor = '';
-      }
-    });
-
-  }, [waterPoints]);
+  }, [selectedLocationPoint]);
 
   // Update current position marker
   useEffect(() => {

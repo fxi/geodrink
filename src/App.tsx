@@ -4,15 +4,24 @@ import { MapView, MapViewRef } from '@/components/map/map-view';
 import { WaterPointsDrawer } from '@/components/water-points-drawer';
 import { SettingsPanel } from '@/components/settings-panel';
 import { CircularControls } from '@/components/map/circular-controls';
-import { GPXData, WaterPoint, CurrentPosition } from '@/types';
+import { GPXData, WaterPoint, LocationPoint, CurrentPosition, LocationFilters } from '@/types';
 
 function App() {
   const [gpxData, setGpxData] = useState<GPXData | null>(null);
   const [waterPoints, setWaterPoints] = useState<WaterPoint[]>([]);
+  const [locationPoints, setLocationPoints] = useState<LocationPoint[]>([]);
   const [currentPosition, setCurrentPosition] = useState<CurrentPosition | null>(null);
   const [selectedWaterPoint, setSelectedWaterPoint] = useState<WaterPoint | null>(null);
+  const [selectedLocationPoint, setSelectedLocationPoint] = useState<LocationPoint | null>(null);
   const [bufferDistance, setBufferDistance] = useState<number>(15);
-  const [waterFilterPreset, setWaterFilterPreset] = useState<string>('potable-only');
+  const [locationFilters, setLocationFilters] = useState<LocationFilters>({
+    drinkingWater: false,
+    restaurants: false,
+    supermarkets: false,
+    gasStations: false,
+    hospitals: false,
+    graveyards: false,
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const mapRef = useRef<MapViewRef>(null);
@@ -24,9 +33,12 @@ function App() {
         ref={mapRef}
         gpxData={gpxData} 
         waterPoints={waterPoints}
+        locationPoints={locationPoints}
         currentPosition={currentPosition}
         selectedWaterPoint={selectedWaterPoint}
+        selectedLocationPoint={selectedLocationPoint}
         onWaterPointSelect={setSelectedWaterPoint}
+        onLocationPointSelect={setSelectedLocationPoint}
         className="absolute inset-0"
       />
 
@@ -38,7 +50,7 @@ function App() {
         onLoadingChange={setIsLoading}
         onSettingsToggle={() => setIsSettingsOpen(true)}
         bufferDistance={bufferDistance}
-        waterFilterPreset={waterFilterPreset}
+        waterFilterPreset="potable-only"
         isLoading={isLoading}
         gpxData={gpxData}
       />
@@ -58,11 +70,11 @@ function App() {
         onOpenChange={setIsSettingsOpen}
         bufferDistance={bufferDistance}
         onBufferDistanceChange={setBufferDistance}
-        waterFilterPreset={waterFilterPreset}
-        onWaterFilterPresetChange={setWaterFilterPreset}
+        locationFilters={locationFilters}
+        onLocationFiltersChange={setLocationFilters}
         gpxData={gpxData}
-        waterPoints={waterPoints}
-        onWaterPointsLoad={setWaterPoints}
+        locationPoints={locationPoints}
+        onLocationPointsLoad={setLocationPoints}
         onLoadingChange={setIsLoading}
         isLoading={isLoading}
       />

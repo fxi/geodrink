@@ -1,0 +1,9 @@
+{
+  "name": "geodrink",
+  "description": "Interactive map application for finding water points and fountains",
+  "tags": ["map", "maplibre", "react", "typescript"],
+  "year_init": 2025,
+  "year_last": 2025,
+  "url": "https://fxi.io/geodrink/",
+  "featured": false
+}
